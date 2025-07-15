@@ -26,3 +26,6 @@ build/
 
 # Node
 node_modules/
+
+# File System DB
+*.sqlite3*
