@@ -9,12 +9,15 @@ const federation = createFederation({
   queue: new InProcessMessageQueue(),
 });
 
-federation.setActorDispatcher("/users/{identifier}", async (ctx, identifier) => {
-  return new Person({
-    id: ctx.getActorUri(identifier),
-    preferredUsername: identifier,
-    name: identifier,
-  });
-});
+federation.setActorDispatcher(
+  "/users/{identifier}",
+  async (ctx, identifier) => {
+    return new Person({
+      id: ctx.getActorUri(identifier),
+      preferredUsername: identifier,
+      name: identifier,
+    });
+  },
+);
 
 export default federation;

@@ -9,5 +9,5 @@ serve(
     fetch: behindProxy(app.fetch.bind(app)),
   },
   (info) =>
-    console.log("Server started at http://" + info.address + ":" + info.port)
+    console.log("Server started at http://" + info.address + ":" + info.port),
 );
