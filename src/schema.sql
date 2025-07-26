@@ -33,5 +33,13 @@ CREATE TABLE IF NOT EXISTS keys (
 );
 -- type IN (RSA_PKCS#1-v1.5, Ed25519) 형식을 따름
 
+CREATE TABLE IF NOT EXISTS follows (
+  following_id INTEGER          REFERENCES actors (id),
+  follower_id  INTEGER          REFERENCES actors (id),
+  created      TEXT    NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+                                CHECK (created <> ''),
+  PRIMARY KEY (following_id, follower_id)
+);
+
 -- sqlite3 microblog.sqlite3 < src/schema.sql 로 베이스 파일 생성
 -- echo "SELECT * FROM users;" | sqlite3 -table microblog.sqlite3 로 Query Execute

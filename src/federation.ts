@@ -5,6 +5,10 @@ import {
   exportJwk,
   generateCryptoKeyPair,
   Person,
+  Follow,
+  getActorHandle,
+  Accept,
+  Undo,
 } from "@fedify/fedify";
 import { getLogger } from "@logtape/logtape";
 import { MemoryKvStore, InProcessMessageQueue } from "@fedify/fedify";
@@ -104,6 +108,106 @@ federation
   });
 
 // getInboxUri()를 위함
-federation.setInboxListeners("/users/{identifier}/inbox", "/inbox");
+federation
+  .setInboxListeners("/users/{identifier}/inbox", "/inbox")
+  .on(Follow, async (ctx, follow) => {
+    if (follow.objectId == null) {
+      logger.debug("The Follow object does not have an object: {follow}", {
+        follow,
+      });
+      return;
+    }
+
+    const object = ctx.parseUri(follow.objectId);
+    if (object == null || object.type !== "actor") {
+      logger.debug("The Follow object's object is not an actor: {follow}", {
+        follow,
+      });
+      return;
+    }
+
+    const follower = await follow.getActor();
+    if (follower?.id == null || follower.inboxId == null) {
+      logger.debug("The Follow object does not have an actor: {follow}", {
+        follow,
+      });
+      return;
+    }
+
+    const followingId = db
+      .prepare<unknown[], Actor>(
+        `
+        SELECT * FROM actors
+        JOIN users ON users.id = actors.user_id
+        WHERE users.username = ?
+        `,
+      )
+      .get(object.identifier)?.id;
+
+    if (followingId == null) {
+      logger.debug(
+        "Failed to find the actor to follow in the database: {object}",
+        { object },
+      );
+    }
+
+    // 팔로워 액터 레코드를 새로 추가하거나 이미 있으면 갱신
+    const followerId = db
+      .prepare<unknown[], Actor>(
+        `
+        INSERT INTO actors (uri, handle, name, inbox_url, shared_inbox_url, url)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (uri) DO UPDATE SET
+          handle = excluded.handle,
+          name = excluded.name,
+          inbox_url = excluded.inbox_url,
+          shared_inbox_url = excluded.shared_inbox_url,
+          url = excluded.url
+        WHERE 
+          actors.uri = excluded.uri
+        RETURNING *
+        `,
+      )
+      .get(
+        follower.id.href, // uri
+        await getActorHandle(follower), // handle
+        follower.name?.toString(),
+        follower.inboxId.href, // inbox_url
+        follower.endpoints?.sharedInbox?.href, // shared_inbox_url
+        follower.url?.href,
+      )?.id;
+
+    db.prepare(
+      "INSERT INTO follows (following_id, follower_id) VALUES (?, ?)",
+    ).run(followingId, followerId);
+
+    // 팔로우 요청을 보낸 액터에게 수락(Accept) 액티비티 전송
+    const accept = new Accept({
+      actor: follow.objectId,
+      to: follow.actorId,
+      object: follow,
+    });
+    await ctx.sendActivity(object, follower, accept);
+  }).on(Undo, async (ctx, undo) => {
+    const object = await undo.getObject();
+
+    if (!(object instanceof Follow)) return;
+    if (undo.actorId == null || object.objectId == null) return;
+    
+    const parsed = ctx.parseUri(object.objectId);
+    if (parsed == null || parsed.type !== 'actor') return;
+
+    db.prepare(
+      `
+      DELETE FROM follows
+      WHERE following_id = (
+        SELECT actors.id
+        FROM actors
+        JOIN users ON actors.user_id = users.id
+        WHERE users.username = ?
+      ) AND follower_id = (SELECT id FROM actors WHERE uri = ?)
+      `
+    ).run(parsed.identifier, undo.actorId.href);
+  });
 
 export default federation;
