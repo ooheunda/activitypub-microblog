@@ -1,17 +1,18 @@
 import {
-  createFederation,
+  Accept,
   Endpoints,
-  importJwk,
+  Follow,
+  Person,
+  type Recipient,
+  Undo,
+  createFederation,
   exportJwk,
   generateCryptoKeyPair,
-  Person,
-  Follow,
   getActorHandle,
-  Accept,
-  Undo,
+  importJwk,
 } from "@fedify/fedify";
+import { InProcessMessageQueue, MemoryKvStore } from "@fedify/fedify";
 import { getLogger } from "@logtape/logtape";
-import { MemoryKvStore, InProcessMessageQueue } from "@fedify/fedify";
 import db from "./db.ts";
 import type { Actor, Key, User } from "./schema.ts";
 
@@ -49,6 +50,7 @@ federation
       url: ctx.getActorUri(identifier),
       publicKey: keys[0].cryptographicKey, // 레거시 키 형식
       assertionMethods: keys.map((k) => k.multikey), // 아래의 두 키 형식을 모두 지원하는 배열 형식
+      followers: ctx.getFollowersUri(identifier),
     });
   })
   .setKeyPairsDispatcher(async (ctx, identifier) => {
@@ -188,14 +190,15 @@ federation
       object: follow,
     });
     await ctx.sendActivity(object, follower, accept);
-  }).on(Undo, async (ctx, undo) => {
+  })
+  .on(Undo, async (ctx, undo) => {
     const object = await undo.getObject();
 
     if (!(object instanceof Follow)) return;
     if (undo.actorId == null || object.objectId == null) return;
-    
+
     const parsed = ctx.parseUri(object.objectId);
-    if (parsed == null || parsed.type !== 'actor') return;
+    if (parsed == null || parsed.type !== "actor") return;
 
     db.prepare(
       `
@@ -206,8 +209,56 @@ federation
         JOIN users ON actors.user_id = users.id
         WHERE users.username = ?
       ) AND follower_id = (SELECT id FROM actors WHERE uri = ?)
-      `
+      `,
     ).run(parsed.identifier, undo.actorId.href);
+  });
+
+// GET /users/{identifier}/followers 요청에 응답할 팔로워 컬렉션 객체를 만듦
+federation
+  .setFollowersDispatcher(
+    "/users/{identifier}/followers",
+    async (ctx, identifier, cursor) => {
+      const followers = db
+        .prepare<unknown[], Actor>(
+          `
+          SELECT followers.*
+          FROM follows
+          JOIN actors AS followers ON (follows.follower_id = followers.id)
+          JOIN actors AS following ON (follows.following_id = following.id)
+          JOIN users ON users.id = following.user_id
+          WHERE users.username = ?
+          ORDER BY follows.created DESC
+          `,
+        )
+        .all(identifier);
+
+      const items: Recipient[] = followers.map((f) => ({
+        id: new URL(f.uri),
+        inboxId: new URL(f.inbox_url),
+        endpoints:
+          f.shared_inbox_url == null
+            ? null
+            : { sharedInbox: new URL(f.shared_inbox_url) },
+      }));
+
+      return { items };
+    },
+  )
+  .setCounter((ctx, identifier) => {
+    // 팔로워 컬렉션의 전체 수량을 구함 (identifier를 팔로우하는 액터의 수)
+    const result = db
+      .prepare<unknown[], { cnt: number }>(
+        `
+        SELECT COUNT(*) AS cnt
+        FROM follows
+        JOIN actors ON actors.id = follows.following_id
+        JOIN users ON users.id = actors.user_id
+        WHERE users.username = ?
+        `,
+      )
+      .get(identifier);
+
+    return result == null ? 0 : result.cnt;
   });
 
 export default federation;
