@@ -1,9 +1,11 @@
+import { Note } from "@fedify/fedify";
 import { federation } from "@fedify/fedify/x/hono";
 import { getLogger } from "@logtape/logtape";
 import { Hono } from "hono";
+import { stringifyEntities } from "stringify-entities";
 import db from "./db.ts";
 import fedi from "./federation.ts";
-import type { Actor, User } from "./schema.ts";
+import type { Actor, Post, User } from "./schema.ts";
 import { FollowerList, Home, Layout, Profile, SetupForm } from "./views.tsx";
 
 const logger = getLogger("microblog");
@@ -160,6 +162,58 @@ app.post("/setup", async (c) => {
   })();
 
   return c.redirect("/");
+});
+
+app.post("/users/:username/posts", async (c) => {
+  const username = c.req.param("username");
+  const actor = db
+    .prepare<unknown[], Actor>(
+      `
+    SELECT actors.*
+    FROM actors
+    JOIN users ON users.id = actors.user_id
+    WHERE users.username = ?
+    `,
+    )
+    .get(username);
+  if (actor == null) return c.redirect("/setup");
+
+  const form = await c.req.formData();
+  const content = form.get("content")?.toString();
+  if (content == null || content.trim() === "") {
+    return c.text("Content is required", 400);
+  }
+
+  const ctx = fedi.createContext(c.req.raw, undefined);
+  const url: string | null = db.transaction(() => {
+    // 임시 URI로 레코드 추가
+    const post = db
+      .prepare<unknown[], Post>(
+        `
+      INSERT INTO posts (uri, actor_id, content)
+      VALUES ('https://localhost/', ?, ?)
+      RETURNING *
+      `,
+      )
+      .get(actor.id, stringifyEntities(content, { escapeOnly: true }));
+    if (post == null) return null;
+
+    // 실제 URI를 구해 레코드 갱신
+    const url = ctx.getObjectUri(Note, {
+      identifier: username,
+      id: post.id.toString(),
+    }).href;
+
+    db.prepare("UPDATE posts SET uri = ?, url = ? WHERE id = ?").run(
+      url,
+      url,
+      post.id,
+    );
+    return url;
+  })();
+
+  if (url == null) return c.text("Failed to create a post", 500);
+  return c.redirect(url);
 });
 
 export default app;
