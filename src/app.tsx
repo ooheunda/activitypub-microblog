@@ -6,13 +6,23 @@ import { stringifyEntities } from "stringify-entities";
 import db from "./db.ts";
 import fedi from "./federation.ts";
 import type { Actor, Post, User } from "./schema.ts";
-import { FollowerList, Home, Layout, Profile, SetupForm } from "./views.tsx";
+import {
+  FollowerList,
+  Home,
+  Layout,
+  PostPage,
+  Profile,
+  SetupForm,
+} from "./views.tsx";
 
 const logger = getLogger("microblog");
 
 const app = new Hono();
 app.use(federation(fedi, () => undefined));
 
+/**
+ * root
+ */
 app.get("/", (c) => {
   const user = db
     .prepare<unknown[], User & Actor>(
@@ -33,6 +43,9 @@ app.get("/", (c) => {
   );
 });
 
+/**
+ * 계정 설정
+ */
 app.get("/setup", (c) => {
   // 계정이 이미 있는지 검사
   const user = db
@@ -53,6 +66,60 @@ app.get("/setup", (c) => {
   );
 });
 
+app.post("/setup", async (c) => {
+  // 계정이 이미 있는지 검사
+  const user = db
+    .prepare<unknown[], User & Actor>(
+      `
+      SELECT * FROM users
+      JOIN actors ON (users.id = actors.user_id)
+      LIMIT 1
+      `,
+    )
+    .get();
+  if (user != null) return c.redirect("/");
+
+  const form = await c.req.formData();
+  const username = form.get("username");
+
+  if (typeof username !== "string" || !username.match(/^[a-z0-9_-]{1,50}$/)) {
+    return c.redirect("/setup");
+  }
+
+  const name = form.get("name");
+  if (typeof name !== "string" || name.trim() === "") {
+    return c.redirect("/setup");
+  }
+
+  const url = new URL(c.req.url);
+  const handle = `@${username}@${url.host}`;
+  const ctx = fedi.createContext(c.req.raw, undefined);
+  db.transaction(() => {
+    db.prepare("INSERT OR REPLACE INTO users (id, username) VALUES (1, ?)").run(
+      username,
+    );
+    db.prepare(
+      `
+      INSERT OR REPLACE INTO actors
+        (user_id, uri, handle, name, inbox_url, shared_inbox_url, url)
+      VALUES (1, ?, ?, ?, ?, ?, ?)
+      `,
+    ).run(
+      ctx.getActorUri(username).href, // uri
+      handle,
+      name,
+      ctx.getInboxUri(username).href, // inbox_url
+      ctx.getInboxUri().href, // shared_inbox_url
+      ctx.getActorUri(username).href, // url
+    );
+  })();
+
+  return c.redirect("/");
+});
+
+/**
+ * 프로필
+ */
 app.get("/users/:username", async (c) => {
   const user = db
     .prepare<unknown[], User & Actor>(
@@ -113,55 +180,45 @@ app.get("/users/:username/followers", async (c) => {
   );
 });
 
-app.post("/setup", async (c) => {
-  // 계정이 이미 있는지 검사
-  const user = db
-    .prepare<unknown[], User & Actor>(
+/**
+ * 게시물
+ */
+app.get("/users/:username/posts/:id", (c) => {
+  const post = db
+    .prepare<unknown[], Post & Actor & User>(
       `
-      SELECT * FROM users
-      JOIN actors ON (users.id = actors.user_id)
-      LIMIT 1
+      SELECT users.*, actors.*, posts.*
+      FROM posts
+      JOIN actors ON actors.id = posts.actor_id
+      JOIN users ON users.id = actors.user_id
+      WHERE users.username = ? AND posts.id = ?
       `,
     )
-    .get();
-  if (user != null) return c.redirect("/");
+    .get(c.req.param("username"), c.req.param("id"));
+  if (post == null) return c.notFound();
 
-  const form = await c.req.formData();
-  const username = form.get("username");
-
-  if (typeof username !== "string" || !username.match(/^[a-z0-9_-]{1,50}$/)) {
-    return c.redirect("/setup");
-  }
-
-  const name = form.get("name");
-  if (typeof name !== "string" || name.trim() === "") {
-    return c.redirect("/setup");
-  }
-
-  const url = new URL(c.req.url);
-  const handle = `@${username}@${url.host}`;
-  const ctx = fedi.createContext(c.req.raw, undefined);
-  db.transaction(() => {
-    db.prepare("INSERT OR REPLACE INTO users (id, username) VALUES (1, ?)").run(
-      username,
-    );
-    db.prepare(
+  // biome-ignore lint/style/noNonNullAssertion: 언제나 하나의 레코드를 반환
+  const { followers } = db
+    .prepare<unknown[], { followers: number }>(
       `
-      INSERT OR REPLACE INTO actors
-        (user_id, uri, handle, name, inbox_url, shared_inbox_url, url)
-      VALUES (1, ?, ?, ?, ?, ?, ?)
+      SELECT count(*) AS followers
+      FROM follows
+      WHERE follows.following_id = ?
       `,
-    ).run(
-      ctx.getActorUri(username).href, // uri
-      handle,
-      name,
-      ctx.getInboxUri(username).href, // inbox_url
-      ctx.getInboxUri().href, // shared_inbox_url
-      ctx.getActorUri(username).href, // url
-    );
-  })();
+    )
+    .get(post.actor_id)!;
 
-  return c.redirect("/");
+  return c.html(
+    <Layout>
+      <PostPage
+        name={post.name ?? post.username}
+        username={post.username}
+        handle={post.handle}
+        followers={followers}
+        post={post}
+      />
+    </Layout>,
+  );
 });
 
 app.post("/users/:username/posts", async (c) => {
