@@ -1,4 +1,4 @@
-import { Note } from "@fedify/fedify";
+import { Create, Note } from "@fedify/fedify";
 import { federation } from "@fedify/fedify/x/hono";
 import { getLogger } from "@logtape/logtape";
 import { Hono } from "hono";
@@ -242,15 +242,15 @@ app.post("/users/:username/posts", async (c) => {
   }
 
   const ctx = fedi.createContext(c.req.raw, undefined);
-  const url: string | null = db.transaction(() => {
+  const post: Post | null = db.transaction(() => {
     // 임시 URI로 레코드 추가
     const post = db
       .prepare<unknown[], Post>(
         `
-      INSERT INTO posts (uri, actor_id, content)
-      VALUES ('https://localhost/', ?, ?)
-      RETURNING *
-      `,
+        INSERT INTO posts (uri, actor_id, content)
+        VALUES ('https://localhost/', ?, ?)
+        RETURNING *
+        `,
       )
       .get(actor.id, stringifyEntities(content, { escapeOnly: true }));
     if (post == null) return null;
@@ -266,11 +266,27 @@ app.post("/users/:username/posts", async (c) => {
       url,
       post.id,
     );
-    return url;
-  })();
 
-  if (url == null) return c.text("Failed to create a post", 500);
-  return c.redirect(url);
+    return post;
+  })();
+  if (post == null) return c.text("Failed to create post", 500);
+
+  const noteArgs = { identifier: username, id: post.id.toString() };
+  const note = await ctx.getObject(Note, noteArgs);
+
+  await ctx.sendActivity(
+    { identifier: username },
+    "followers",
+    new Create({
+      id: new URL("#activity", note?.id ?? undefined),
+      object: note,
+      actors: note?.attributionIds,
+      tos: note?.toIds,
+      ccs: note?.ccIds,
+    }),
+  );
+
+  return c.redirect(ctx.getObjectUri(Note, noteArgs).href);
 });
 
 export default app;
