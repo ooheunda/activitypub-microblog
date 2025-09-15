@@ -1,4 +1,4 @@
-import { Create, Note } from "@fedify/fedify";
+import { Create, Follow, Note, isActor, lookupObject } from "@fedify/fedify";
 import { federation } from "@fedify/fedify/x/hono";
 import { getLogger } from "@logtape/logtape";
 import { Hono } from "hono";
@@ -301,6 +301,37 @@ app.post("/users/:username/posts", async (c) => {
   );
 
   return c.redirect(ctx.getObjectUri(Note, noteArgs).href);
+});
+
+/**
+ * 팔로잉
+ */
+app.post("/users/:username/following", async (c) => {
+  const username = c.req.param("username");
+  const form = await c.req.formData();
+
+  const handle = form.get("actor");
+  if (typeof handle !== "string") {
+    return c.text("Invalid actor handle or URL", 400);
+  }
+
+  const ctx = fedi.createContext(c.req.raw, undefined);
+  const actor = await lookupObject(handle.trim());
+  if (!isActor(actor)) {
+    return c.text("Invalid actor handle or URL", 400);
+  }
+
+  await ctx.sendActivity(
+    { identifier: username },
+    actor,
+    new Follow({
+      actor: ctx.getActorUri(username),
+      object: actor.id,
+      to: actor.id,
+    }),
+  );
+
+  return c.text("Successfully sent a follow request");
 });
 
 export default app;
