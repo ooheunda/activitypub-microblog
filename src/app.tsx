@@ -8,6 +8,7 @@ import fedi from "./federation.ts";
 import type { Actor, Post, User } from "./schema.ts";
 import {
   FollowerList,
+  FollowingList,
   Home,
   Layout,
   PostList,
@@ -134,6 +135,18 @@ app.get("/users/:username", async (c) => {
   if (user == null) return c.notFound();
 
   // biome-ignore lint/style/noNonNullAssertion: 언제나 하나의 레코드를 반환
+  const { following } = db
+    .prepare<unknown[], { following: number }>(
+      `
+      SELECT count(*) AS following
+      FROM follows
+      JOIN actors ON follows.follower_id = actors.id
+      WHERE actors.user_id = ?
+      `,
+    )
+    .get(user.id)!;
+
+  // biome-ignore lint/style/noNonNullAssertion: 언제나 하나의 레코드를 반환
   const { followers } = db
     .prepare<unknown[], { followers: number }>(
       `
@@ -165,6 +178,7 @@ app.get("/users/:username", async (c) => {
         name={user.name ?? user.username}
         username={user.username}
         handle={handle}
+        following={following}
         followers={followers}
       />
       <PostList posts={posts} />
@@ -212,15 +226,15 @@ app.get("/users/:username/posts/:id", (c) => {
   if (post == null) return c.notFound();
 
   // biome-ignore lint/style/noNonNullAssertion: 언제나 하나의 레코드를 반환
-  const { followers } = db
-    .prepare<unknown[], { followers: number }>(
+  const { following, followers } = db
+    .prepare<unknown[], { following: number; followers: number }>(
       `
-      SELECT count(*) AS followers
+      SELECT sum(follows.follower_id = ?) AS following,
+             sum(follows.following_id = ?) AS followers
       FROM follows
-      WHERE follows.following_id = ?
       `,
     )
-    .get(post.actor_id)!;
+    .get(post.actor_id, post.actor_id)!;
 
   return c.html(
     <Layout>
@@ -228,6 +242,7 @@ app.get("/users/:username/posts/:id", (c) => {
         name={post.name ?? post.username}
         username={post.username}
         handle={post.handle}
+        following={following}
         followers={followers}
         post={post}
       />
@@ -306,6 +321,28 @@ app.post("/users/:username/posts", async (c) => {
 /**
  * 팔로잉
  */
+app.get("/users/:username/following", async (c) => {
+  const following = db
+    .prepare<unknown[], Actor>(
+      `
+      SELECT following.*
+      FROM follows
+      JOIN actors AS followers ON follows.follower_id = followers.id
+      JOIN actors AS following ON follows.following_id = following.id
+      JOIN users ON users.id = followers.user_id
+      WHERE users.username = ?
+      ORDER BY follows.created DESC
+      `,
+    )
+    .all(c.req.param("username"));
+
+  return c.html(
+    <Layout>
+      <FollowingList following={following} />
+    </Layout>,
+  );
+});
+
 app.post("/users/:username/following", async (c) => {
   const username = c.req.param("username");
   const form = await c.req.formData();
