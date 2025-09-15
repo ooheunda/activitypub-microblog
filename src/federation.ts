@@ -1,6 +1,7 @@
 import {
   type Actor as APActor,
   Accept,
+  Create,
   Endpoints,
   Follow,
   Note,
@@ -224,6 +225,25 @@ federation
       )
       `,
     ).run(followingId, parsed.identifier);
+  })
+  .on(Create, async (ctx, create) => {
+    const object = await create.getObject();
+    if (!(object instanceof Note)) return;
+
+    const actor = create.actorId;
+    if (actor == null) return;
+
+    const author = await object.getAttribution();
+    if (!isActor(author) || author.id?.href !== actor.href) return;
+
+    const actorId = (await persistActor(author))?.id;
+    if (actorId == null) return;
+    if (object.id == null) return;
+
+    const content = object.content?.toString();
+    db.prepare(
+      "INSERT INTO posts (uri, actor_id, content, url) VALUES (?, ?, ?, ?)",
+    ).run(object.id.href, actorId, content, object.url?.href);
   });
 
 // GET /users/{identifier}/followers 요청에 응답할 팔로워 컬렉션 객체를 만듦
